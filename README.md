@@ -14,6 +14,7 @@ A simple GUI tool to manage and fix mod Owner IDs in Workers and Resources Sovie
 - ⚙️ Easily fix individual mods or fix all at once with one click
 - 💾 Remembers your game folder and Owner ID - auto-checks status on startup
 - ⚡ "Fix All" button to batch update all unfixed mods
+- 📡 **Search and download mods from Skymods** with automatic pagination (fetches ALL results)
 
 ## Setup
 
@@ -70,7 +71,16 @@ python mod_installer.py
    - Click the individual "Fix" button on any mod that needs updating
    - Or click "⚡ Fix All" to update all unfixed mods at once
 
-6. **Refresh** - Click "🔄 Refresh Mods" to re-scan the workshop folder anytime
+6. **Download From Skymods** - Click "📡 Download From Catalogue" to:
+   - Search for mods by name (e.g., "road", "building", specific mod names)
+   - The app automatically fetches ALL search results (multiple pages)
+   - View detailed information about each mod found
+   - Download and extract 7z archives automatically to your workshop_wip folder
+   - Preview the mod before applying the fix
+   - Confirm to automatically apply your target Owner ID
+   - The mod appears in your list immediately, ready to use!
+
+7. **Refresh** - Click "🔄 Refresh Mods" to re-scan the workshop folder anytime
 
 ## Configuration
 
