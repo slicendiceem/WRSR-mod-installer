@@ -3,7 +3,7 @@ import os
 import json
 import re
 import tempfile
-import py7zr
+import zipfile
 from pathlib import Path
 import requests
 from html.parser import HTMLParser
@@ -26,12 +26,13 @@ class ModDownloader(QThread):
     finished = pyqtSignal(dict)       # mod_data dict with extracted info
     error = pyqtSignal(str)
 
-    def __init__(self, download_url, mod_name, game_folder, target_owner_id):
+    def __init__(self, download_url, mod_name, game_folder, target_owner_id, mod_id=None):
         super().__init__()
         self.download_url = download_url
         self.mod_name = mod_name
         self.game_folder = game_folder
         self.target_owner_id = target_owner_id
+        self.mod_id = mod_id  # Steam mod ID to rename folder to
         self.temp_dir = None
 
     def run(self):
@@ -43,13 +44,42 @@ class ModDownloader(QThread):
             zip_path = Path(self.temp_dir) / f'{self.mod_name}.zip'
             self._download_file(self.download_url, zip_path)
 
-            # Extract to workshop folder
-            workshop_path = Path(self.game_folder) / 'media_soviet' / 'workshop_wip' / self.mod_name
-            self._extract_mod(zip_path, workshop_path)
+            # Extract to temp folder first
+            extract_temp = Path(self.temp_dir) / 'extracted'
+            self._extract_mod(zip_path, extract_temp)
+
+            # Find the mod folder inside the extracted contents and rename it
+            workshop_wip = Path(self.game_folder) / 'media_soviet' / 'workshop_wip'
+            workshop_wip.mkdir(parents=True, exist_ok=True)
+
+            # Find the mod folder (should be a single directory at root of extraction)
+            extracted_contents = list(extract_temp.iterdir())
+            if not extracted_contents:
+                raise Exception("Extracted archive is empty")
+
+            # Find the first directory (the mod folder)
+            mod_folder = None
+            for item in extracted_contents:
+                if item.is_dir():
+                    mod_folder = item
+                    break
+
+            if not mod_folder:
+                raise Exception("No mod folder found in archive")
+
+            # Determine final folder name - use mod_id if available, otherwise use original name
+            final_folder_name = self.mod_id if self.mod_id else mod_folder.name
+            final_path = workshop_wip / final_folder_name
+
+            # Move mod folder to workshop_wip with new name
+            if final_path.exists():
+                import shutil
+                shutil.rmtree(final_path)
+            mod_folder.rename(final_path)
 
             # Read extracted mod config to get metadata
-            mod_data = self._read_mod_config(workshop_path)
-            mod_data['path'] = str(workshop_path)
+            mod_data = self._read_mod_config(final_path)
+            mod_data['path'] = str(final_path)
 
             self.finished.emit(mod_data)
 
@@ -65,10 +95,33 @@ class ModDownloader(QThread):
                     pass
 
     def _download_file(self, url, dest_path):
-        """Download file with progress updates"""
+        """Download file with progress updates, handling modsbase redirects"""
         try:
-            response = requests.get(url, stream=True, timeout=30)
+            print(f"[DEBUG] Starting download from: {url}")
+
+            # Special handling for modsbase URLs
+            if 'modsbase.com' in url:
+                print(f"[DEBUG] Detected modsbase URL - checking if direct download is available...")
+                # Try simple fallback first
+                if url.endswith('.html'):
+                    simple_url = url[:-5]
+                    print(f"[DEBUG] Trying direct URL without .html: {simple_url}")
+                    response = requests.head(simple_url, timeout=10)
+                    if response.status_code == 200:
+                        content_type = response.headers.get('content-type', '').lower()
+                        if 'application/zip' in content_type or 'application/octet-stream' in content_type:
+                            print(f"[DEBUG] Direct URL works as ZIP file!")
+                            url = simple_url
+                        else:
+                            print(f"[DEBUG] Direct URL returned: {content_type}")
+
+            print(f"[DEBUG] Final download URL: {url}")
+            response = requests.get(url, stream=True, timeout=30, allow_redirects=True)
             response.raise_for_status()
+
+            print(f"[DEBUG] HTTP Status: {response.status_code}")
+            print(f"[DEBUG] Content-Type: {response.headers.get('content-type', 'unknown')}")
+            print(f"[DEBUG] Content-Length: {response.headers.get('content-length', 'unknown')}")
 
             total_size = int(response.headers.get('content-length', 0))
             downloaded = 0
@@ -82,47 +135,111 @@ class ModDownloader(QThread):
                             percent = int((downloaded / total_size) * 100)
                             self.progress.emit(self.mod_name, percent)
 
+            file_size = dest_path.stat().st_size
+            print(f"[DEBUG] Download complete. File size: {file_size} bytes")
+
+            # Check if we downloaded HTML by mistake
+            if file_size < 100000:  # Mods should be bigger than 100KB typically
+                first_bytes = dest_path.read_bytes()[:50]
+                if b'<!DOCTYPE' in first_bytes or b'<html' in first_bytes:
+                    print(f"[DEBUG] ERROR: Downloaded file appears to be HTML, not a ZIP")
+                    raise Exception("Modsbase requires manual interaction (clicking button). Please download the file manually and use 'Install From ZIP File' button instead.")
+
         except requests.exceptions.RequestException as e:
-            raise Exception(f"Download failed: {str(e)}")
+            if 'modsbase.com' in str(url):
+                raise Exception(f"Download failed: {str(e)}\n\nNote: modsbase.com requires clicking a button to generate download links. Please download manually and use 'Install From ZIP File' button.")
+            else:
+                raise Exception(f"Download failed: {str(e)}")
+
+    def _extract_direct_modsbase_link(self, modsbase_url):
+        """Extract the direct ZIP download link from modsbase.com page"""
+        try:
+            print(f"[DEBUG] Fetching modsbase page: {modsbase_url}")
+            response = requests.get(modsbase_url, timeout=10)
+            response.raise_for_status()
+
+            print(f"[DEBUG] Modsbase page fetched. Content length: {len(response.text)} chars")
+            print(f"[DEBUG] Page URL after redirects: {response.url}")
+
+            import re
+
+            # Save the HTML page for inspection
+            debug_file = Path.home() / 'modsbase_debug.html'
+            try:
+                with open(debug_file, 'w', encoding='utf-8') as f:
+                    f.write(response.text)
+                print(f"[DEBUG] Saved modsbase HTML page to: {debug_file}")
+            except:
+                pass
+
+            # Look for actual download links (not the .html page itself)
+            patterns = [
+                # Match .zip files that are NOT followed by .html
+                r'href=["\']([^"\']*\.zip)(?!\.html)["\']',
+                # Look for links with /download/ in them
+                r'href=["\']([^"\']*?/download[^"\']*?\.zip[^"\']*?)["\']',
+                # Look for data-file or file attributes
+                r'data-file=["\']([^"\']*\.zip[^"\']*)["\']',
+                r'file=["\']([^"\']*\.zip[^"\']*)["\']',
+                # Look for any URL with .zip not followed by .html
+                r'([^"\'<>\s]*\.zip)(?!\.html)',
+            ]
+
+            for i, pattern in enumerate(patterns):
+                print(f"[DEBUG] Trying pattern {i+1}: {pattern}")
+                matches = re.findall(pattern, response.text, re.IGNORECASE)
+                for link in matches:
+                    # Skip if it's the HTML page URL or a placeholder
+                    if not link or link.endswith('.html') or link.startswith('$') or len(link) < 10:
+                        continue
+
+                    print(f"[DEBUG] Pattern {i+1} matched! Found: {link}")
+
+                    if link.startswith('/'):
+                        link = 'https://modsbase.com' + link
+                    elif not link.startswith('http'):
+                        link = modsbase_url.rsplit('/', 1)[0] + '/' + link
+
+                    print(f"[DEBUG] Constructed link: {link}")
+                    return link
+
+            print("[DEBUG] No direct download link found in page HTML")
+            print(f"[DEBUG] Check the saved HTML at: {debug_file}")
+
+        except Exception as e:
+            print(f"[DEBUG] Error in _extract_direct_modsbase_link: {str(e)}")
+
+        print("[DEBUG] Failed to extract link from modsbase page")
+        return None
 
     def _extract_mod(self, archive_path, dest_path):
-        """Extract 7z archive to destination"""
+        """Extract mod archive (ZIP format) to destination"""
         try:
-            with py7zr.SevenZipFile(archive_path, 'r') as archive:
-                # Get all items in archive
-                file_list = archive.getnames()
+            print(f"[DEBUG] Opening archive: {archive_path}")
+            print(f"[DEBUG] Archive file size: {archive_path.stat().st_size} bytes")
+
+            with zipfile.ZipFile(archive_path, 'r') as archive:
+                file_list = archive.namelist()
 
                 if not file_list:
                     raise Exception("Archive is empty")
 
-                # Check if archive has single parent directory
-                parent_dirs = set()
-                for item in file_list:
-                    parts = item.split('/')
-                    if len(parts) > 1:
-                        parent_dirs.add(parts[0])
+                print(f"[DEBUG] Archive contains {len(file_list)} files")
+                print(f"[DEBUG] First 10 files: {file_list[:10]}")
 
-                # If all items start with single directory, extract contents up one level
-                if len(parent_dirs) == 1:
-                    parent = list(parent_dirs)[0]
-                    # Extract all and strip parent directory
-                    dest_path.mkdir(parents=True, exist_ok=True)
-                    archive.extractall(path=dest_path)
+                # Extract all files to destination
+                dest_path.mkdir(parents=True, exist_ok=True)
+                print(f"[DEBUG] Extracting to: {dest_path}")
+                archive.extractall(path=dest_path)
+                print(f"[DEBUG] Extraction complete")
 
-                    # Move files from parent subdir to dest_path
-                    parent_path = dest_path / parent
-                    if parent_path.exists():
-                        for item in parent_path.iterdir():
-                            item.rename(dest_path / item.name)
-                        parent_path.rmdir()
-                else:
-                    # Extract directly
-                    dest_path.mkdir(parents=True, exist_ok=True)
-                    archive.extractall(path=dest_path)
-
-        except py7zr.Bad7zFile:
-            raise Exception("Invalid 7z archive format")
+        except zipfile.BadZipFile as e:
+            print(f"[DEBUG] BadZipFile error: {str(e)}")
+            print(f"[DEBUG] Archive path: {archive_path}")
+            print(f"[DEBUG] First 100 bytes of file: {archive_path.read_bytes()[:100]}")
+            raise Exception("Invalid archive format - expected ZIP file")
         except Exception as e:
+            print(f"[DEBUG] Extraction error: {str(e)}")
             raise Exception(f"Extraction failed: {str(e)}")
 
     def _read_mod_config(self, mod_path):
@@ -300,18 +417,121 @@ class ModDetailsDialog(QDialog):
         return html
 
 
+class ModSearchThread(QThread):
+    """Background thread for searching mods on Skymods"""
+    progress = pyqtSignal(str, int)  # message, results_count
+    results_found = pyqtSignal(list)  # mods found on this page (for immediate display)
+    finished = pyqtSignal(list)      # results list (final)
+    error = pyqtSignal(str)
+
+    SKYMODS_BASE_URL = 'https://catalogue.smods.ru'
+
+    def __init__(self, search_term):
+        super().__init__()
+        self.search_term = search_term
+
+    def run(self):
+        try:
+            all_mods = []
+            page = 1
+            max_pages = 50
+
+            while page <= max_pages:
+                try:
+                    # First page: /?s={term}&app=784150
+                    # Other pages: /page/{page}?s={term}&app=784150
+                    if page == 1:
+                        url = f'{self.SKYMODS_BASE_URL}/?s={self.search_term}&app=784150'
+                    else:
+                        url = f'{self.SKYMODS_BASE_URL}/page/{page}?s={self.search_term}&app=784150'
+                    response = requests.get(url, timeout=30)
+                    response.raise_for_status()
+
+                    mods_on_page = self._parse_results_page(response.text)
+
+                    if not mods_on_page:
+                        break
+
+                    all_mods.extend(mods_on_page)
+                    # Emit both progress and the new mods found
+                    self.progress.emit(f'Fetched page {page}... Found {len(all_mods)} mod(s)', len(all_mods))
+                    self.results_found.emit(mods_on_page)  # Add to list immediately
+                    page += 1
+
+                except Exception as e:
+                    if page == 1:
+                        raise
+                    break
+
+            self.finished.emit(all_mods)
+
+        except Exception as e:
+            self.error.emit(f"Search error: {str(e)}")
+
+    def _parse_results_page(self, html):
+        """Parse a single Skymods search results page"""
+        mods = []
+        try:
+            import re
+
+            post_pattern = r'<h[2-3][^>]*class="[^"]*post-title[^"]*"[^>]*>.*?<a[^>]*href="([^"]+)"[^>]*>([^<]+)</a'
+            matches = re.finditer(post_pattern, html, re.IGNORECASE | re.DOTALL)
+
+            for match in matches:
+                mod_url = match.group(1)
+                mod_name = match.group(2).strip()
+
+                if mod_url and mod_name:
+                    # Extract Steam mod ID from URL (e.g., https://catalogue.smods.ru/archives/421998 -> 421998)
+                    mod_id_match = re.search(r'/archives/(\d+)', mod_url)
+                    mod_id = mod_id_match.group(1) if mod_id_match else None
+
+                    mods.append({
+                        'name': mod_name[:100],
+                        'url': mod_url,
+                        'mod_id': mod_id,
+                        'download_url': None,
+                    })
+
+            if not mods:
+                link_pattern = r'<a[^>]*href="' + re.escape(self.SKYMODS_BASE_URL) + r'/([^/"]+)[^"]*"[^>]*>([^<]{5,100})</a>'
+                matches = re.finditer(link_pattern, html)
+
+                for match in matches:
+                    mod_slug = match.group(1)
+                    mod_name = match.group(2).strip()
+
+                    if self.search_term.lower() in mod_name.lower():
+                        mod_url = f'{self.SKYMODS_BASE_URL}/{mod_slug}'
+                        # Try to extract ID from slug if it's numeric
+                        mod_id = mod_slug if mod_slug.isdigit() else None
+                        mods.append({
+                            'name': mod_name,
+                            'url': mod_url,
+                            'mod_id': mod_id,
+                            'download_url': None,
+                        })
+
+        except Exception as e:
+            pass
+
+        return mods
+
+
 class ModCatalogueDialog(QDialog):
     """Dialog for searching and downloading mods from Skymods"""
     mod_selected = pyqtSignal(dict)  # Emits mod data with download_url
 
     SKYMODS_BASE_URL = 'https://catalogue.smods.ru'
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, game_folder=None):
         super().__init__(parent)
         self.setWindowTitle('Search and Download Mods from Skymods')
         self.setGeometry(100, 100, 1100, 700)
         self.search_results = []
         self.selected_mod = None
+        self.search_thread = None
+        self.game_folder = game_folder
 
         layout = QVBoxLayout()
 
@@ -376,7 +596,7 @@ class ModCatalogueDialog(QDialog):
         self.setLayout(layout)
 
     def perform_search(self):
-        """Search Skymods for mods matching the search term"""
+        """Search Skymods for mods matching the search term (in background thread)"""
         search_term = self.search_input.text().strip()
         if not search_term:
             self.results_label.setText('Please enter a search term')
@@ -387,128 +607,113 @@ class ModCatalogueDialog(QDialog):
         self.selected_mod = None
         self.details_label.setText('Searching...')
 
-        try:
-            self.search_results = self._fetch_all_results(search_term)
+        # Cancel previous search if running
+        if self.search_thread and self.search_thread.isRunning():
+            self.search_thread.quit()
+            self.search_thread.wait()
 
-            if self.search_results:
-                self.results_label.setText(f'Found {len(self.search_results)} mod(s)')
-                self._populate_results_list()
-            else:
-                self.results_label.setText(f'No mods found for "{search_term}"')
-                self.details_label.setText('Try a different search term')
+        # Start new search in background thread
+        self.search_thread = ModSearchThread(search_term)
+        self.search_thread.progress.connect(self.on_search_progress)
+        self.search_thread.results_found.connect(self.on_mods_found)  # Add mods immediately
+        self.search_thread.finished.connect(self.on_search_complete)
+        self.search_thread.error.connect(self.on_search_error)
+        self.search_thread.start()
 
-        except Exception as e:
-            self.results_label.setText('Error searching Skymods')
-            self.details_label.setText(f'Error: {str(e)}')
+    def on_search_progress(self, message, count):
+        """Update progress while searching"""
+        self.results_label.setText(f'{message}')
 
-    def _fetch_all_results(self, search_term):
-        """Fetch ALL search results from Skymods (all pages)"""
-        all_mods = []
-        page = 1
-        max_pages = 50  # Safety limit
+    def on_mods_found(self, mods):
+        """Add mods to the list immediately as they're found"""
+        for mod in mods:
+            self.search_results.append(mod)
+            status = "✓ Download available" if mod['download_url'] else "⚠ No download"
+            display_name = f"{mod['name']} [{status}]"
+            self.results_list.addItem(display_name)
 
-        while page <= max_pages:
-            try:
-                url = f'{self.SKYMODS_BASE_URL}/?s={search_term}&paged={page}'
-                response = requests.get(url, timeout=30)  # Increased timeout for Skymods
-                response.raise_for_status()
+    def on_search_complete(self, results):
+        """Handle search completion"""
+        # Results already added via on_mods_found, just update label
+        if self.search_results:
+            self.results_label.setText(f'Found {len(self.search_results)} mod(s) - Search complete')
+        else:
+            search_term = self.search_input.text().strip()
+            self.results_label.setText(f'No mods found for "{search_term}"')
+            self.details_label.setText('Try a different search term')
 
-                mods_on_page = self._parse_results_page(response.text, search_term)
+    def on_search_error(self, error_msg):
+        """Handle search error"""
+        self.results_label.setText('Error searching Skymods')
+        self.details_label.setText(f'Error: {error_msg}')
 
-                if not mods_on_page:
-                    break  # No more results
-
-                all_mods.extend(mods_on_page)
-                page += 1
-
-            except Exception as e:
-                if page == 1:
-                    raise  # Error on first page is critical
-                break  # Stop pagination on later pages
-
-        return all_mods
-
-    def _parse_results_page(self, html, search_term):
-        """Parse a single Skymods search results page"""
-        mods = []
-        try:
-            import re
-
-            # Look for mod entries - search for title and download link patterns
-            # Pattern: Find mod titles and associate with download links
-            mod_pattern = r'<a[^>]*href="([^"]*)"[^>]*>\s*([^<]+(?:' + re.escape(search_term) + r'[^<]*)?)<\s*/a>'
-
-            # More specific: look for post titles
-            post_pattern = r'<h[2-3][^>]*class="[^"]*post-title[^"]*"[^>]*>.*?<a[^>]*href="([^"]+)"[^>]*>([^<]+)</a'
-            matches = re.finditer(post_pattern, html, re.IGNORECASE | re.DOTALL)
-
-            for match in matches:
-                mod_url = match.group(1)
-                mod_name = match.group(2).strip()
-
-                if mod_url and mod_name:
-                    # Extract download link from mod page
-                    download_url = self._extract_download_link(mod_url)
-
-                    if download_url:
-                        mods.append({
-                            'name': mod_name[:100],  # Limit name length
-                            'url': mod_url,
-                            'download_url': download_url,
-                        })
-
-            # If no results with above pattern, try simpler approach
-            if not mods:
-                # Look for any links that might be mods
-                link_pattern = r'<a[^>]*href="' + re.escape(self.SKYMODS_BASE_URL) + r'/([^/"]+)[^"]*"[^>]*>([^<]{5,100})</a>'
-                matches = re.finditer(link_pattern, html)
-
-                for match in matches:
-                    mod_slug = match.group(1)
-                    mod_name = match.group(2).strip()
-
-                    if search_term.lower() in mod_name.lower():
-                        mod_url = f'{self.SKYMODS_BASE_URL}/{mod_slug}'
-                        download_url = self._extract_download_link(mod_url)
-
-                        if download_url:
-                            mods.append({
-                                'name': mod_name,
-                                'url': mod_url,
-                                'download_url': download_url,
-                            })
-
-        except Exception as e:
-            pass
-
-        return mods
 
     def _extract_download_link(self, mod_page_url):
-        """Extract the 7z download link from a mod page"""
+        """Extract download link, description, image, and prerequisites from mod page"""
         try:
-            response = requests.get(mod_page_url, timeout=20)  # Increased timeout for Skymods
+            response = requests.get(mod_page_url, timeout=20)
             response.raise_for_status()
 
             import re
-            # Look for 7z download links
+            # Look for download links (ZIP files from modsbase)
             patterns = [
-                r'href="([^"]*\.7z[^"]*)"',
-                r'href="(https://[^"]*?\.7z?[^"]*)"',
-                r'<a[^>]*href="([^"]*)"[^>]*>.*?Download.*?</a>',
+                r'href="(https://modsbase\.com/[^"]*\.zip[^"]*)"',
+                r'href="([^"]*\.zip[^"]*)"',
+                r'href="(https://[^"]*download[^"]*)"',
             ]
 
+            download_url = None
             for pattern in patterns:
                 match = re.search(pattern, response.text, re.IGNORECASE)
                 if match:
-                    link = match.group(1)
-                    if '://' not in link:
-                        link = self.SKYMODS_BASE_URL + link
-                    return link
+                    download_url = match.group(1)
+                    if '://' not in download_url:
+                        download_url = self.SKYMODS_BASE_URL + download_url
+                    break
+
+            # Extract description (look for entry-content or post-content)
+            description = ""
+            desc_pattern = r'<div[^>]*class="[^"]*entry-content[^"]*"[^>]*>(.*?)</div>'
+            desc_match = re.search(desc_pattern, response.text, re.IGNORECASE | re.DOTALL)
+            if desc_match:
+                description = desc_match.group(1)
+                # Strip HTML tags
+                description = re.sub(r'<[^>]+>', '', description).strip()[:500]
+
+            # Extract image
+            image_url = None
+            img_pattern = r'<img[^>]*src="([^"]*)"[^>]*'
+            img_matches = re.finditer(img_pattern, response.text)
+            for img_match in img_matches:
+                img_src = img_match.group(1)
+                if any(x in img_src.lower() for x in ['/uploads/', 'image', 'mod', 'preview']):
+                    image_url = img_src
+                    if '://' not in image_url:
+                        image_url = self.SKYMODS_BASE_URL + image_url
+                    break
+
+            # Extract prerequisites (look for dependency/requirement mentions)
+            prerequisites = []
+            prereq_pattern = r'(?:Requires?|Depends?|Prerequisites?):\s*([^<\n]+)'
+            prereq_matches = re.finditer(prereq_pattern, response.text, re.IGNORECASE)
+            for match in prereq_matches:
+                prereq_text = match.group(1).strip()
+                prerequisites.append(prereq_text)
+
+            return {
+                'download_url': download_url,
+                'description': description,
+                'image_url': image_url,
+                'prerequisites': prerequisites,
+            }
 
         except Exception as e:
-            pass
-
-        return None
+            return {
+                'download_url': None,
+                'description': "",
+                'image_url': None,
+                'prerequisites': [],
+            }
 
     def _populate_results_list(self):
         """Populate the results list widget"""
@@ -519,7 +724,7 @@ class ModCatalogueDialog(QDialog):
             item = self.results_list.addItem(display_name)
 
     def on_result_selected(self, item):
-        """Show mod details when selected"""
+        """Show mod details when selected and fetch download link, description, image, and prerequisites"""
         row = self.results_list.row(item)
         if 0 <= row < len(self.search_results):
             self.selected_mod = self.search_results[row]
@@ -529,16 +734,39 @@ class ModCatalogueDialog(QDialog):
                 f"<a href='{self.selected_mod['url']}'>View on Skymods</a><br><br>"
             )
 
+            # If we haven't fetched the details yet, fetch them now
+            if self.selected_mod['download_url'] is None:
+                details += "Fetching mod details..."
+                self.details_label.setText(details)
+
+                # Fetch all mod details
+                mod_details = self._extract_download_link(self.selected_mod['url'])
+                self.selected_mod['download_url'] = mod_details['download_url']
+                self.selected_mod['description'] = mod_details['description']
+                self.selected_mod['image_url'] = mod_details['image_url']
+                self.selected_mod['prerequisites'] = mod_details['prerequisites']
+
+            # Build details display
+            details = f"<b>{self.selected_mod['name']}</b><br><br>"
+
+            if self.selected_mod.get('description'):
+                details += f"<b>Description:</b><br>{self.selected_mod['description']}<br><br>"
+
+            if self.selected_mod.get('prerequisites'):
+                details += f"<b>Prerequisites:</b><br>"
+                for prereq in self.selected_mod['prerequisites']:
+                    details += f"• {prereq}<br>"
+                details += "<br>"
+
             if self.selected_mod['download_url']:
                 details += "✓ Download link available<br>Click 'Download Selected' to proceed."
             else:
-                details += "⚠ No 7z download found<br><a href='" + self.selected_mod[
-                    'url'] + "'>Visit page to download manually</a>"
+                details += f"⚠ No download found<br><a href='{self.selected_mod['url']}'>Visit page to download manually</a>"
 
             self.details_label.setText(details)
 
     def on_download_clicked(self):
-        """Emit signal when user clicks download"""
+        """Check prerequisites, then emit signal when user clicks download"""
         if not self.selected_mod:
             QMessageBox.warning(self, 'Error', 'Please select a mod from results')
             return
@@ -546,13 +774,62 @@ class ModCatalogueDialog(QDialog):
         if not self.selected_mod['download_url']:
             QMessageBox.warning(
                 self, 'No Download',
-                'This mod does not have a direct 7z download link.\n\n'
+                'This mod does not have a download link.\n\n'
                 'Please download it manually from the Skymods page.'
             )
             return
 
+        # Check prerequisites if mod is available on this system
+        if self.game_folder:
+            missing_prereqs = self._check_prerequisites(self.selected_mod)
+            if missing_prereqs:
+                reply = QMessageBox.warning(
+                    self, 'Missing Prerequisites',
+                    f'This mod requires:\n\n' + '\n'.join(missing_prereqs) +
+                    '\n\nDo you want to continue anyway?',
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    return
+
         self.mod_selected.emit(self.selected_mod)
         self.close()
+
+    def _check_prerequisites(self, mod):
+        """Check if mod prerequisites are installed in workshop_wip"""
+        if not self.game_folder or not mod.get('prerequisites'):
+            return []
+
+        workshop_path = Path(self.game_folder) / 'media_soviet' / 'workshop_wip'
+        if not workshop_path.exists():
+            return []
+
+        missing = []
+        installed_mods = {d.name for d in workshop_path.iterdir() if d.is_dir()}
+
+        def normalize_name(name):
+            """Normalize mod names for comparison (ignore spaces, underscores, hyphens)"""
+            return re.sub(r'[\s_\-]+', '', name).lower()
+
+        for prereq in mod.get('prerequisites', []):
+            # Check if prerequisite mod name appears in installed mods
+            prereq_found = False
+            normalized_prereq = normalize_name(prereq)
+
+            for installed in installed_mods:
+                normalized_installed = normalize_name(installed)
+                # Check for exact match after normalization or substring match
+                if normalized_prereq == normalized_installed or \
+                   normalized_prereq in normalized_installed or \
+                   normalized_installed in normalized_prereq:
+                    prereq_found = True
+                    break
+
+            if not prereq_found:
+                missing.append(f"• {prereq.strip()}")
+
+        return missing
 
 
 class ModInstallerApp(QMainWindow):
@@ -642,6 +919,11 @@ class ModInstallerApp(QMainWindow):
         download_btn.clicked.connect(self.open_catalogue_browser)
         self.download_btn = download_btn
         left_layout.addWidget(download_btn)
+
+        select_zip_btn = QPushButton('📂 Install From ZIP File')
+        select_zip_btn.setStyleSheet('background-color: #5a7fa8; color: white;')
+        select_zip_btn.clicked.connect(self.select_and_install_zip)
+        left_layout.addWidget(select_zip_btn)
 
         fix_all_btn = QPushButton('⚡ Fix All')
         fix_all_btn.setStyleSheet('background-color: #d78521; color: white; font-weight: bold;')
@@ -919,9 +1201,137 @@ class ModInstallerApp(QMainWindow):
             QMessageBox.warning(self, 'Error', 'Please select a game folder first')
             return
 
-        dialog = ModCatalogueDialog(self)
+        dialog = ModCatalogueDialog(self, self.game_folder)
         dialog.mod_selected.connect(self.on_mod_selected_from_catalogue)
         dialog.exec_()
+
+    def select_and_install_zip(self):
+        """Let user manually select a ZIP file to install"""
+        if not self.game_folder:
+            QMessageBox.warning(self, 'Error', 'Please select a game folder first')
+            return
+
+        if not self.target_owner_id:
+            QMessageBox.warning(self, 'Error', 'Please set a target Owner ID first')
+            return
+
+        # Open file dialog
+        zip_file = QFileDialog.getOpenFileName(
+            self,
+            'Select Mod ZIP File',
+            str(Path.home() / 'Downloads'),
+            'ZIP Files (*.zip);;All Files (*)'
+        )
+
+        if not zip_file[0]:
+            return
+
+        zip_path = Path(zip_file[0])
+        if not zip_path.exists():
+            QMessageBox.warning(self, 'Error', 'File not found')
+            return
+
+        # Extract and install
+        try:
+            # Extract to temp folder first
+            import tempfile
+            temp_dir = tempfile.mkdtemp()
+            extract_temp = Path(temp_dir) / 'extracted'
+            extract_temp.mkdir(parents=True, exist_ok=True)
+
+            print(f"[DEBUG] Extracting ZIP: {zip_path}")
+
+            # Extract
+            with zipfile.ZipFile(zip_path, 'r') as archive:
+                archive.extractall(path=extract_temp)
+
+            # Find the mod folder inside
+            extracted_contents = list(extract_temp.iterdir())
+            if not extracted_contents:
+                raise Exception("ZIP file is empty")
+
+            mod_folder = None
+            for item in extracted_contents:
+                if item.is_dir():
+                    mod_folder = item
+                    break
+
+            if not mod_folder:
+                raise Exception("No folder found in ZIP file")
+
+            # Use original folder name (user will rename later if needed)
+            final_folder_name = mod_folder.name
+            workshop_wip = Path(self.game_folder) / 'media_soviet' / 'workshop_wip'
+            workshop_wip.mkdir(parents=True, exist_ok=True)
+            final_path = workshop_wip / final_folder_name
+
+            # Move to final location
+            if final_path.exists():
+                import shutil
+                shutil.rmtree(final_path)
+
+            mod_folder.rename(final_path)
+
+            # Clean up temp
+            import shutil
+            shutil.rmtree(temp_dir)
+
+            # Read mod config
+            config_path = final_path / 'workshopconfig.ini'
+            if not config_path.exists():
+                raise Exception("workshopconfig.ini not found in mod")
+
+            # Read metadata
+            content = config_path.read_text(encoding='utf-8')
+            owner_id_match = re.search(r'\$OWNER_ID\s*[=\s]\s*(\d+)', content)
+            owner_id = owner_id_match.group(1).strip() if owner_id_match else None
+
+            item_type_match = re.search(r'\$ITEM_TYPE\s*WORKSHOP_ITEMTYPE_(\w+)', content)
+            item_type = item_type_match.group(1) if item_type_match else 'Unknown'
+
+            item_name_match = re.search(r'\$ITEM_NAME\s+"([^"]+)"', content)
+            item_name = item_name_match.group(1) if item_name_match else 'Unknown'
+
+            item_desc_match = re.search(r'\$ITEM_DESC\s+"([\s\S]*?)"\s*(?=\$|\Z)', content)
+            item_desc = item_desc_match.group(1) if item_desc_match else 'No description'
+
+            mod_data = {
+                'name': final_folder_name,
+                'path': str(final_path),
+                'config_path': str(config_path),
+                'owner_id': owner_id,
+                'item_type': item_type,
+                'item_name': item_name,
+                'item_desc': item_desc,
+            }
+
+            # Show preview dialog
+            dialog = ModDetailsDialog(mod_data, self)
+            dialog.exec_()
+
+            # Ask for confirmation
+            reply = QMessageBox.question(
+                self,
+                'Apply Owner ID Fix?',
+                f'Apply Owner ID fix to: {mod_data["item_name"]}?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+
+            if reply == QMessageBox.Yes:
+                self.apply_fix_to_downloaded_mod(mod_data)
+            else:
+                # User declined, remove the extracted mod
+                import shutil
+                if final_path.exists():
+                    try:
+                        shutil.rmtree(final_path)
+                        QMessageBox.information(self, 'Info', 'Mod was not installed.')
+                    except:
+                        pass
+
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Failed to extract mod: {str(e)}')
 
     def on_mod_selected_from_catalogue(self, mod_data):
         """Handle mod selected from catalogue"""
@@ -934,7 +1344,8 @@ class ModInstallerApp(QMainWindow):
             mod_data['download_url'],
             mod_data['name'],
             self.game_folder,
-            self.target_owner_id
+            self.target_owner_id,
+            mod_data.get('mod_id')  # Pass the Steam mod ID if available
         )
         self.downloader_thread.progress.connect(self.on_download_progress)
         self.downloader_thread.finished.connect(self.on_download_complete)
