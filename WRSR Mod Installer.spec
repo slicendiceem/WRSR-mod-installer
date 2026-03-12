@@ -5,7 +5,7 @@ a = Analysis(
     ['mod_installer.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('logos', 'logos')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

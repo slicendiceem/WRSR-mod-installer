@@ -9,9 +9,10 @@ if %errorlevel% neq 0 (
     python -m pip install PyInstaller==6.1.0
 )
 
-REM Build the executable
+REM Build the executable using the spec file
+REM This ensures logos folder and all assets are included
 echo Creating executable...
-pyinstaller --onefile --windowed --name "WRSR Mod Installer" mod_installer.py
+pyinstaller "WRSR Mod Installer.spec" --onefile --windowed
 
 echo.
 echo Build complete! The executable is in the 'dist' folder.
