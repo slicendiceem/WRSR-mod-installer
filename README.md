@@ -1,187 +1,110 @@
 # WRSR Mod Installer
 
-A comprehensive GUI tool to manage, fix, and download mods for Workers and Resources Soviet Republic. Features advanced mod discovery, prerequisite handling, and batch downloading.
+A desktop app to manage, fix and download mods for **Workers & Resources: Soviet Republic**: find mods on the Skymods catalogue, download them together with the mods they need, and set the Owner ID in each mod's `workshopconfig.ini`.
 
 ## Features
 
-### Mod Management
-- 📁 Browse and select your WRSR game folder
-- 🔍 Automatically detects all installed mods from `media_soviet\workshop_wip`
-- 📝 Displays folder name and actual item name from config
-- 🏷️ Automatically categorizes mods by type (Building, Road, Decoration, Vehicle, etc.)
-- 🖼️ View detailed mod information with preview images and descriptions
-- 🎯 Set a target Owner ID to compare against
-- 📊 Shows mod status: Fixed or Not Fixed
-- ⚙️ Fix individual mods or all mods at once with one click
-- 💾 Remembers your game folder and Owner ID - auto-checks status on startup
+### Library
+- 🔍 Lists every mod in `media_soviet\workshop_wip`, with its name, type, folder and Owner ID
+- 🎯 Shows at a glance which mods already carry your Owner ID (**Fixed**) and which still need it
+- ⚙️ Applies your Owner ID to one mod, or to all of them with one click
+- 🖼️ Shows the selected mod's preview image and description beside the list, with no pop-ups
+- 📦 Installs mods from a ZIP file you already downloaded, with a preview first. An existing copy is only replaced after you confirm, and only once the new copy is safely in place
+- 🌍 Reads configs saved in any common encoding (UTF-8, with or without BOM, and Windows-1251) and keeps everything except the Owner ID line byte-for-byte
 
-### Mod Discovery & Download
-- 📡 **Search and download mods from Skymods** with automatic pagination
-- 🔗 **Multi-select support** - Select multiple mods and queue them for download
-- 🎯 **Queue system** - Download multiple mods sequentially with progress tracking
-- 🔄 **Automatic prerequisite detection** - Automatically finds and adds required mods to download queue
-- 📋 **Details preview panel** - View mod information without popups blocking the interface
-- ⏳ **Three-stage progress tracking**:
-  - Queue Progress: Shows position in download queue (X/Total)
-  - Link Preparation: Tracks browser operations and link generation
-  - File Download: Shows actual file transfer progress (0-100%)
-- 🌐 **Browser automation** - Handles modsbase downloads with automatic session management
-- 🏗️ Automatic prerequisite installation before main mod
+### Browse Skymods
+- 📡 Searches the Skymods catalogue for WRSR mods. The first page appears first, and **Load more** fetches the next
+- ⚡ Remembers what Skymods sent: a search or mod you looked at before shows up instantly, then refreshes quietly in the background
+- 🏷️ Marks results that are **Installed**, already **In downloads**, or **Need other mods**
+- 📋 Shows the description and required mods of the selected result
+- ⏹️ The window never freezes while searching; you can stop or replace a slow search at any time
 
-### Interface & UX
-- 🎨 Professional UI with WRSR branding
-- 📍 Responsive layout with resizable panels
-- 🎭 Color-coded mod status indicators
-- ✨ Smooth animations and progress feedback
+### Downloads
+- 📥 Downloads mods one at a time with live progress, and keeps going when one fails
+- 🔗 Queues the mods a mod needs as soon as their names are known: straight away if you opened the mod before adding it, otherwise once its page loads. They fill in when they're found on Skymods (by Steam ID, several at once), and the mod's own download never waits for them
+- ✋ Cancel, retry or remove any download
+- 🌐 Handles modsbase.com's download pages by itself, waiting out their short countdown like any visitor. If a page doesn't behave as usual, it offers **Open download page** so you can finish that download in your browser
+
+### Look and feel
+- 🎨 A dark theme in the game's red, with a sidebar, inline notices and small notifications instead of message boxes
+- 💾 Remembers your game folder and Owner ID
 
 ## Setup
 
 ### Prerequisites
-- Python 3.7 or later
-- Windows, macOS, or Linux
+- Windows 10 or 11 (the app also runs on macOS and Linux from source)
+- Python 3.10 or later to build the executable or run from source; the built exe itself doesn't need Python
 
-### Installation
+### Option 1: Build the executable (recommended)
+Double-click `build.bat`. It sets up a private Python environment in `.venv` with everything the app needs, then creates `dist\WRSR Mod Installer.exe`. That's a single file that runs without Python. Close the app first if it's running, since an open exe can't be replaced.
 
-1. **Install Python dependencies:**
-   ```cmd
-   pip install -r requirements.txt
-   ```
+### Option 2: Run from source
+Double-click `run.bat`. The first time, it sets up `.venv` the same way.
 
-## Usage
+## How to use
 
-### Option 1: Run as an executable (Windows) - Recommended
-1. **Build the executable** (one-time setup):
-   ```cmd
-   build.bat
-   ```
-   This will create a standalone `WRSR Mod Installer.exe` in the `dist` folder.
+1. **Settings**: choose your game folder (the one that contains `media_soviet`) and enter your Owner ID, normally your 17-digit Steam ID.
+2. **Library**: mods marked **Needs Owner ID** get an **Apply** button; **Apply Owner ID to all** fixes them all at once.
+3. **Browse**: search for a mod, select a result to read about it, then press **Add to downloads** (or double-click the result). Mods it needs are added automatically.
+4. **Downloads**: watch the progress. When the queue is finished, open the Library to apply your Owner ID to the new mods.
+5. **Install ZIP…** (Library page) installs a mod archive you downloaded yourself.
 
-2. **Run the executable**:
-   Simply double-click `WRSR Mod Installer.exe` (no Python installation needed!)
+Your game folder and Owner ID are saved in `C:\Users\<you>\.wrsr_mod_installer_config.json`. Delete that file to reset them.
 
-### Option 2: Run using the batch file (Windows)
-Simply double-click `run.bat` (requires Python to be installed)
+Pages from Skymods are kept for up to a week in `%LOCALAPPDATA%\WRSR Mod Installer\cache`. Deleting that folder is always safe.
 
-### Option 3: Run from command prompt
-```cmd
-python mod_installer.py
-```
-(requires Python to be installed)
+## How it works
 
-### How to Use
-
-1. **Select Game Folder** - Click "📁 Select Game Folder" and navigate to your WRSR game installation directory
-
-2. **Set Target Owner ID** - Enter the Owner ID you want all mods to use, then click "💾 Save Owner ID"
-
-3. **View Installed Mods** - The app automatically scans and displays all mods organized by type:
-   - **Folder Name** - The actual folder name in the workshop_wip directory
-   - **Item Name** - The display name from config
-   - **Type Column** - Shows the mod category
-   - ✓ **Fixed** (Green) - Matches your target ID
-   - ✗ **Not Fixed** (Orange) - Has a different ID or no ID set
-   - **Click any row** to view detailed mod information
-
-4. **Fix Mods** - Choose:
-   - Click the individual "Fix" button on any mod that needs updating
-   - Or click "⚡ Fix All" to update all unfixed mods at once
-
-5. **Download Mods From Catalogue**:
-   - Click "📡 Download From Catalogue" to open the mod browser
-   - **Search** - Type mod name or keywords to search Skymods
-   - **Preview** - Click any mod in the results list to see details in the preview panel
-   - **Multi-Select** - Select multiple mods from search results
-   - **Queue** - Click the arrow button to add selected mods to your download queue
-   - **Prerequisites** - The app automatically detects required mods and adds them to the queue
-   - **Download All** - Click "Download All in Queue" to start batch downloading
-   - **Progress Monitoring**:
-     - Queue Progress bar shows which mod you're downloading (e.g., 2/5)
-     - Link Preparation bar shows browser/link generation progress
-     - File Download bar shows actual file transfer progress (0-100%)
-   - Mods are automatically extracted and installed to your workshop_wip folder
-   - Already-installed mods are automatically detected and shown in green
-
-6. **Install From ZIP File**:
-   - Click "📂 Install From ZIP File" to manually import a mod ZIP archive
-   - Select your mod ZIP file and it will be automatically extracted and installed
-
-7. **Refresh** - Click "🔄 Refresh Mods" to re-scan the workshop folder anytime
-
-## Configuration
-
-Your game folder path and Target Owner ID are automatically saved to:
-- Windows: `C:\Users\[YourUsername]\.wrsr_mod_installer_config.json`
-
-You can manually delete this file to reset all settings.
-
-## Files
-
-- `mod_installer.py` - Main application
-- `requirements.txt` - Python dependencies
-- `run.bat` - Quick launch script (Windows, requires Python)
-- `build.bat` - Build script to create standalone executable (Windows)
-- `logos/` - Application branding assets
-  - `wrsrlogo.jfif` - Window icon and taskbar icon
-  - `wrsrbanner.png` - Mod selector sidebar banner (200px height)
-
-## How It Works
-
-### Mod Management
-1. Scans the `media_soviet\workshop_wip` directory for mod folders
-2. Reads the `workshopconfig.ini` file in each mod
-3. Extracts: mod name, description, type, owner ID, and preview image
-4. Compares each mod's ID against your target Owner ID
-5. Displays status: "Fixed" (matches target) or "Not Fixed" (doesn't match)
-6. Updates the `$OWNER_ID` value when you click "Fix" or "Fix All"
-
-### Mod Discovery & Download
-1. **Search** - Connects to Skymods catalogue and searches for mods by keyword
-2. **Pagination** - Automatically fetches all pages of search results
-3. **Details** - Fetches mod details in background (image, description, prerequisites)
-4. **Selection** - Allows multi-select of mods from search results
-5. **Queue** - Builds a download queue with selected mods
-6. **Prerequisites** - Extracts required mods from HTML, searches for them, and adds to queue automatically
-7. **Download** - Downloads and extracts mods sequentially with real-time progress updates
-8. **Installation** - Extracts ZIP to `workshop_wip` folder and applies target Owner ID
-9. **Detection** - Recognizes already-installed mods using name normalization
-
-### Progress Tracking
-- **Queue Progress** - Shows current position (e.g., 2/5) as mods download
-- **Link Preparation** - Shows browser operations (page load, button click, link generation)
-- **File Download** - Shows actual file transfer progress from 0-100%
+- **Mods** are folders in `media_soviet\workshop_wip` with a `workshopconfig.ini`. The app reads `$ITEM_ID`, `$OWNER_ID`, `$ITEM_TYPE`, `$ITEM_NAME` and `$ITEM_DESC` from it. Applying the Owner ID rewrites only the `$OWNER_ID` line, or adds one at the top.
+- **Search** reads catalogue.smods.ru result pages (app 784150). Each result already includes the mod's Steam ID, download link, size and author.
+- **Required mods** come from the "Required items" list on a mod's page. That page is only opened when the search listing marks the mod as needing other mods, or was already opened in Browse. Each required mod gets its queue row right away, then is looked up on Skymods by Steam ID, never by name, so a similarly named mod is never downloaded by mistake. Several are looked up at once. Ones you already have are noted on the mod's row instead of queued; ones Skymods doesn't have show as failed rows.
+- **Saved pages**: every Skymods page the app fetches is kept on disk for up to a week. Searches younger than 10 minutes, and mod pages and Steam ID lookups younger than a day, are reused without asking Skymods. Older ones are shown at once while a fresh copy loads.
+- **Downloads** from modsbase.com work the way a visitor's do. The app opens the page, waits out its countdown, and submits the same download form the Download button submits. It then saves the file that comes back, with live progress. Archives are unpacked to a temporary folder. The mod is found wherever its `workshopconfig.ini` is inside the archive, and the folder is named after `$ITEM_ID`, like the game does.
 
 ## Troubleshooting
 
-**"Workshop path not found"**
-- Make sure you selected the correct game folder (where `media_soviet` folder exists)
+**The exe says "No module named 'PyQt5'" (or `requests`)**
+The exe was built with a Python that didn't have the app's requirements installed. Older versions of `build.bat` used whichever Python came first on PATH. Run the current `build.bat` again: it builds inside `.venv`, and the build now stops with a clear message instead of producing a broken exe.
 
-**"Python is not recognized"**
-- Make sure Python is installed and added to your PATH
-- Alternatively, use the full path: `C:\Python\python.exe mod_installer.py`
+**Searches or mod details take a long time**
+Skymods' server is sometimes fast and sometimes takes up to a minute per page. The app works around it:
+- Searches and mods you've seen before show up instantly from the saved copy, then refresh in the background.
+- Adding a mod starts its download straight away. Only the mods it needs are looked up, all at once.
 
-**Permission denied when updating a mod**
-- Close the game if it's running
-- Make sure the file isn't write-protected
+Only a brand-new search, or a mod you've never opened, can still take a while. The app shows how long it has been waiting, and you can stop or start another search at any time.
 
-**Download fails or times out**
-- Check your internet connection
-- Some mods may take longer to download
-- The timeout is set to 30 seconds - longer than typical
+**"Skymods is putting the app through a browser check"**
+Skymods' Cloudflare protection sometimes refuses apps for a while and shows a "Just a moment…" check that only a real browser can pass. The app won't try to get around it. Searches and mods you've seen before keep working from saved pages. Otherwise, try again later, or find the mod on catalogue.smods.ru in your browser and use **Install ZIP…**.
 
-**Prerequisites not being added automatically**
-- Make sure you have internet connection
-- The app searches by Steam ID
-- If a prerequisite mod isn't found on Skymods, it won't be added
+**A download offers "Open download page"**
+modsbase's page didn't behave as usual: an error, or no Download button or file link. Press **Open download page**, download the file in your browser, then use **Install ZIP…** in the Library.
 
-**"ModsBase redirect" errors during download**
-- Some download mirrors require browser session handling
-- The app uses Playwright to handle this automatically
-- If issues persist, try downloading a simpler mod first to test connectivity
+**"Access denied" when applying the Owner ID**
+Close the game and check the mod's files aren't read-only.
 
-**sipPyTypeDict deprecation warnings**
-- These are harmless PyQt5 internal warnings
-- They don't affect functionality and can be safely ignored
-- Caused by library compatibility, not your code
+**"There's no media_soviet\workshop_wip folder…"**
+Choose the folder where the game itself is installed, usually `…\steamapps\common\SovietRepublic`.
+
+## Development
+
+```cmd
+.venv\Scripts\python -m pip install -r requirements-dev.txt
+.venv\Scripts\python -m pytest
+```
+(`run.bat` or `build.bat` create `.venv` the first time.)
+
+- `mod_installer.py`: starts the app
+- `wrsr_installer/`: the app
+  - `workshop.py`: reads and edits `workshopconfig.ini`, scans the workshop folder
+  - `archive.py`: unpacks archives and installs mod folders safely
+  - `skymods.py`: Skymods search and mod pages
+  - `downloader.py`: direct and browser-based downloads, with progress and cancelling
+  - `download_queue.py`, `services.py`: the download queue, including required mods
+  - `cache.py`: Skymods pages saved on disk
+  - `app_state.py`, `config.py`, `tasks.py`: shared state, settings, background work
+  - `ui/`: the Qt interface (theme, pages, widgets)
+- `tests/`: automated tests; `tests/fixtures/` hold sample Skymods pages
+- `logos/`: app icon and artwork
 
 ## License
 

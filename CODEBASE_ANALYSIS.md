@@ -1,331 +1,58 @@
-# WRSR Mod Installer - Codebase Analysis
+# WRSR Mod Installer: how the code fits together
 
-## 1. Project Overview
+A PyQt5 desktop app for Workers & Resources: Soviet Republic. It lists mods in the game's `media_soviet/workshop_wip` folder, writes an Owner ID into their `workshopconfig.ini`, and downloads mods (plus the mods they need) from the Skymods catalogue.
 
-**Purpose**: A GUI tool for managing and fixing mod Owner IDs in "Workers and Resources: Soviet Republic" (WRSR) workshop mods.
+`mod_installer.py` only starts the app; everything else is in the `wrsr_installer` package.
 
-**Core Functionality**:
-- Scan and display installed mods from `media_soviet/workshop_wip`
-- Compare mod Owner IDs against a target ID
-- Fix individual or all mods by updating their `$OWNER_ID` in `workshopconfig.ini`
-- Search, download, and install mods from Skymods catalogue
-- Preview mod details (images, descriptions)
-- Batch operations for efficiency
+## Layers
 
-**Technology Stack**:
-- Python 3.7+
-- PyQt5 for GUI
-- Requests for HTTP operations
-- PyInstaller for executable packaging
-- Windows-focused but cross-platform capable
-
-## 2. Architecture & Design Patterns
-
-### 2.1 MVC-like Architecture
-- **Model**: `ModScanner`, `ModDownloader`, `ModSearchThread` handle data operations
-- **View**: PyQt5 widgets (`QMainWindow`, `QDialog`, `QTableWidget`)
-- **Controller**: `ModInstallerApp` coordinates between models and views
-
-### 2.2 Multithreading Design
-- Heavy operations run in background threads (`QThread`) to keep UI responsive:
-  - `ModScanner`: Scans filesystem for mods
-  - `ModDownloader`: Downloads and extracts mod archives
-  - `ModSearchThread`: Searches Skymods catalogue
-- Thread communication via PyQt signals (`pyqtSignal`)
-
-### 2.3 Modular Class Structure
-
-#### Core Classes:
-1. **`ModInstallerApp`** (`QMainWindow`)
-   - Main application window
-   - Manages UI components and user interactions
-   - Coordinates between different components
-   - Handles configuration persistence
-
-2. **`ModScanner`** (`QThread`)
-   - Scans `workshop_wip` directory for mods
-   - Parses `workshopconfig.ini` files
-   - Extracts metadata: name, description, type, Owner ID
-   - Emits list of mods when complete
-
-3. **`ModDownloader`** (`QThread`)
-   - Downloads mod archives from URLs
-   - Extracts ZIP files
-   - Moves mods to `workshop_wip` directory
-   - Reads mod configuration after extraction
-
-4. **`ModSearchThread`** (`QThread`)
-   - Searches Skymods catalogue via web scraping
-   - Parses HTML results with regex patterns
-   - Paginates through search results
-   - Extracts download links and mod details
-
-5. **`ModCatalogueDialog`** (`QDialog`)
-   - UI for searching and browsing Skymods
-   - Displays search results with details
-   - Handles prerequisite checking
-   - Initiates downloads
-
-6. **`ModDetailsDialog`** (`QDialog`)
-   - Displays detailed mod information
-   - Shows preview images
-   - Renders formatted descriptions with wiki markup
-
-7. **`ModDetailsDialog`** (`QDialog`)
-   - Preview dialog for mod details
-
-### 2.4 Configuration Management
-- JSON configuration file at `~/.wrsr_mod_installer_config.json`
-- Stores `game_folder` and `target_owner_id`
-- Auto-loads on startup, auto-saves on changes
-
-## 3. Key Data Structures
-
-### Mod Dictionary Format:
-```python
-{
-    'name': 'folder_name',           # Directory name
-    'path': '/full/path/to/mod',     # Absolute path
-    'config_path': '/path/workshopconfig.ini',
-    'owner_id': '12345',             # Current Owner ID (or None)
-    'item_type': 'Building',         # Mod category
-    'item_name': 'Display Name',     # Human-readable name
-    'item_desc': 'Description text'  # May contain wiki markup
-}
+```
+ui/ (Qt widgets)           pages, theme, widgets: no file or network access of their own
+   │ signals / callbacks
+app_state.py, download_queue.py   shared state and the download queue (QObjects)
+   │ run_task() on QThreadPool
+workshop.py  archive.py  skymods.py  downloader.py  cache.py   plain Python, no Qt
 ```
 
-### Configuration Format:
-```json
-{
-    "game_folder": "C:/Games/WRSR",
-    "target_owner_id": "12345"
-}
-```
+Everything slow (scanning, network, extracting, writing files) runs through `tasks.run_task`, which runs a function on the shared thread pool and delivers its result, error, progress or cancellation on the GUI thread. Tasks stay referenced until their last signal arrives, and every task gets a `CancelToken` (`cancel.py`).
 
-## 4. File Processing Logic
+## Modules
 
-### 4.1 Mod Detection
-1. Scan `media_soviet/workshop_wip/*` directories
-2. Look for `workshopconfig.ini` in each
-3. Parse with regex patterns:
-   - `\$OWNER_ID\s*[=\s]\s*(\d+)`
-   - `\$ITEM_TYPE\s*WORKSHOP_ITEMTYPE_(\w+)`
-   - `\$ITEM_NAME\s+"([^"]+)"`
-   - `\$ITEM_DESC\s+"([\s\S]*?)"\s*(?=\$|\Z)`
+| Module | Responsibility |
+|---|---|
+| `workshop.py` | Parse `workshopconfig.ini` (`$ITEM_ID`, `$OWNER_ID`, `$ITEM_TYPE`, `$ITEM_NAME`, `$ITEM_DESC`), detect its encoding (UTF-8 ± BOM, cp1251, Latin-1) so edits round-trip byte-for-byte, rewrite only the `$OWNER_ID` line, scan the workshop folder, and answer "is this installed?" by Steam ID or exact name (`InstalledIndex`). |
+| `archive.py` | Unpack a ZIP, find the folder holding `workshopconfig.ini` at any depth, name the install folder after `$ITEM_ID`, and install with a backup-and-swap so a failed replace restores the old copy. Uses `shutil.move`, so the temp folder may be on another drive. |
+| `skymods.py` | Search catalogue.smods.ru (app 784150), parse result pages and mod pages, sanitize descriptions to a small HTML allowlist, and turn network failures into readable `SkymodsError`s. |
+| `downloader.py` | Downloads with progress and cancel. modsbase.com pages are handled as a visitor would, in plain HTTP: open the page, wait out its countdown (`data-total`), submit its download form, then save the file from the link (or file) that comes back. Anything unexpected raises `ManualDownloadRequired` with the page URL, so the user can finish in a browser. That covers an error status (including Cloudflare's bot check), no download form, and no file link. The result is checked to be a ZIP and not an error page. |
+| `download_queue.py` | The queue model: one download at a time, plus the mods each one needs. A required mod gets its row (a "placeholder") as soon as its name is known: at once if the mod's page was already loaded, otherwise when it loads. It then fills in from a lookup by Steam ID; lookups run in parallel. The mod's own page is opened only when its listing says it needs others (or has no download link). Requirements that are installed are noted instead of queued; already-queued ones aren't added twice; ones Skymods lacks become failed rows. Rows go ahead of the mod if it hasn't started, otherwise right after it. Supports cancel, retry, remove, and a summary once downloads and lookups are done. |
+| `cache.py` | `PageCache`: Skymods pages saved on disk (gzip JSON, atomic writes), with their age, pruned at startup (7 days, 400 pages). Any read or write problem just means "not saved". |
+| `services.py` | Connects the queue to the real Skymods and download functions and to the game folder: `make_installer` (download, unpack, install), `load_requirements` (a mod's page) and `look_up` (a mod by Steam ID). |
+| `app_state.py` | Settings (via `config.py`), the scanned mod list, Owner ID changes with per-mod error reporting, and stale-scan protection. |
+| `config.py` | Loads and saves `~/.wrsr_mod_installer_config.json` (same file and keys as version 1). |
+| `ui/` | `main_window.py` (sidebar, pages, toasts, quit guard), `library_page.py`, `browse_page.py`, `downloads_page.py`, `settings_page.py`, `install_dialog.py`, `widgets.py` (toasts, banners, pills, async images), `theme.py` (dark palette and stylesheet), `icons.py` (SVG line icons), `text.py` (BBCode to safe HTML), `dialogs.py` (confirmations, dark title bar). |
 
-### 4.2 Owner ID Fixing
-1. Read `workshopconfig.ini` content
-2. Replace existing `$OWNER_ID` line with new value
-3. If no `$OWNER_ID` exists, prepend it to file
-4. Write back with UTF-8 encoding
+## Behaviour worth knowing
 
-### 4.3 Archive Handling
-- Supports ZIP archives only
-- Extracts to temporary directory
-- Identifies mod folder (first directory in archive)
-- Renames folder to Steam mod ID if available
-- Moves to `workshop_wip` directory
+- **Skymods is slow, unpredictably.** Measured on one day: the same kinds of uncached pages took 1–2 s at some times and 15–62 s at others, whatever the user agent. Its Cloudflare cache keeps searches for 5 minutes and never keeps mod pages, so the app keeps its own copies:
+  - **Reuse:** `skymods.get_html(fresh_for=…)` reuses saved pages. That's 10 minutes for searches, and 1 day for mod pages and Steam ID lookups.
+  - **Instant display:** the Browse page shows saved results and saved mod pages immediately and refreshes older ones in the background (`saved_search`, `saved_mod`). When merging an older copy into a fresh listing, only gaps are filled (`fill_from`), so fresh download links win.
+  - **Timeouts:** the read timeout is 120 s, and the UI shows how long it has waited.
+  - **Searching:** searches load one page at a time ("Load more"). A new search or Stop makes the UI ignore the old request's result immediately.
+- **Owner IDs are applied manually after downloads.** Version 1.0 removed the per-download prompt so batch downloads aren't interrupted; the Library shows which mods still need it.
+- **Nothing is deleted before the user confirms.** The ZIP install previews the mod first. Replacing a mod keeps the old copy until the new one is in place.
 
-## 5. Web Integration
+## Tests
 
-### 5.1 Skymods Catalogue
-- Base URL: `https://catalogue.smods.ru`
-- Search: `/?s={term}&app=784150` (WRSR app ID)
-- Pagination: `/page/{page}?s={term}&app=784150`
-- HTML scraping with regex patterns
+`python -m pytest` runs the suite (pytest + pytest-qt; Qt runs off-screen):
 
-### 5.2 Download Link Extraction
-- Multiple regex patterns attempt to find ZIP download links
-- Special handling for `modsbase.com` URLs
-- Fallback to manual download if automatic fails
+- Core logic: config parsing and editing, encodings, archive layouts, safe replace, cross-drive moves, Skymods parsing (fixtures in `tests/fixtures` mirror the real markup with made-up content), timeouts and HTTP errors (local test server), downloads with progress and cancel.
+- modsbase downloads against a local imitation of its flow. The tests check that the countdown is waited out, that the form fields are submitted, cancelling mid-countdown, direct file answers, and the hand-off to the browser on error pages, missing forms or missing links.
+- The queue, including required mods, against a fake catalogue whose page loads and lookups can be held back or fail. Also app state and UI behaviour: search, double-click to queue, Owner ID buttons, settings validation.
 
-### 5.3 Prerequisite Checking
-- Parses mod descriptions for "Requires"/"Depends" mentions
-- Compares against installed mods (normalized name matching)
-- Warns user about missing dependencies
+## Build
 
-## 6. User Interface Components
+`build.bat` creates (or reuses) `.venv`, installs `requirements.txt` into it, and runs PyInstaller from there with `WRSR Mod Installer.spec`. The result is a single windowed `dist/WRSR Mod Installer.exe` that bundles the `logos` folder. `run.bat` uses the same `.venv`.
 
-### 6.1 Main Window Layout
-```
-┌─────────────────────────────────────────────────────────────┐
-│ WRSR Mod Installer                    [Select Game Folder]  │
-├──────────────┬──────────────────────────────────────────────┤
-│ Left Panel   │ Right Panel (Mods Table)                     │
-│ - Game folder│ - Mod list with columns:                     │
-│ - Owner ID   │   Folder, Name, Type, ID, Status, Action     │
-│ - Buttons:   │ - Statistics: Fixed/Not Fixed counts         │
-│   • Refresh  │ - Click row for details                      │
-│   • Download │                                              │
-│   • Fix All  │                                              │
-└──────────────┴──────────────────────────────────────────────┘
-```
+Earlier builds drove modsbase through a hidden browser (Playwright). That was dropped: Cloudflare in front of modsbase now answers headless browsers with a bot check (403, `cf-mitigated: challenge`) that never clears, while plain requests get the normal page.
 
-### 6.2 Dialog Windows
-- **Mod Details**: Shows preview image, description, metadata
-- **Catalogue Browser**: Search interface for Skymods
-- **Progress Dialogs**: For downloads and operations
-
-### 6.3 Table Features
-- Color-coded status (green/orange)
-- Grouped by mod type
-- Clickable rows for details
-- Action buttons per row for fixing
-
-## 7. Build & Deployment
-
-### 7.1 Dependencies
-```txt
-PyQt5==5.15.9      # GUI framework
-PyInstaller==6.1.0  # Executable packaging
-requests==2.31.0    # HTTP client
-```
-
-### 7.2 Build Process (`build.bat`)
-1. Checks for PyInstaller installation
-2. Installs if missing
-3. Runs: `pyinstaller --onefile --windowed --name "WRSR Mod Installer" mod_installer.py`
-4. Output: Single executable in `dist/` folder
-
-### 7.3 Execution Options
-1. **Executable**: `dist/WRSR Mod Installer.exe` (standalone)
-2. **Batch file**: `run.bat` (requires Python)
-3. **Direct**: `python mod_installer.py`
-
-## 8. Error Handling & Robustness
-
-### 8.1 Common Issues Handled
-- Missing game folder
-- Invalid Owner ID format
-- Permission errors when writing files
-- Network failures during downloads
-- Corrupted or invalid ZIP archives
-- Missing `workshopconfig.ini` files
-
-### 8.2 Recovery Mechanisms
-- Temporary file cleanup
-- Thread cancellation on errors
-- User-friendly error messages
-- Configuration fallbacks
-
-### 8.3 Debug Features
-- Extensive `[DEBUG]` logging
-- HTML page saving for troubleshooting
-- Progress reporting for long operations
-
-## 9. Potential Issues & Limitations
-
-### 9.1 Technical Limitations
-1. **Web Scraping Fragility**: Relies on Skymods HTML structure; changes break search
-2. **ZIP-only Archives**: Doesn't support RAR, 7z, or other formats
-3. **Windows Path Assumptions**: Uses backslashes but `pathlib` helps cross-platform
-4. **Encoding Assumptions**: Assumes UTF-8 for config files
-5. **No Mod Updates**: Cannot update existing mods to newer versions
-6. **No Conflict Detection**: Doesn't check for mod conflicts or load order
-
-### 9.2 Security Considerations
-- Downloads and executes arbitrary ZIP files
-- No signature verification for mods
-- Web scraping may violate Skymods terms of service
-- Stores configuration in user home directory
-
-### 9.3 Usability Issues
-- No batch rename functionality
-- Cannot reorder mods
-- No backup before modifying files
-- Limited search filtering options
-
-## 10. Extension Points & Improvement Opportunities
-
-### 10.1 Immediate Improvements
-1. **Add 7z Support**: Use `py7zr` for additional archive formats
-2. **Better Error Recovery**: Retry mechanisms for downloads
-3. **Mod Backup**: Create backups before modifying files
-4. **Batch Rename**: Rename multiple mod folders at once
-5. **Load Order Management**: Drag-and-drop reordering
-
-### 10.2 Advanced Features
-1. **Mod Version Checking**: Compare against Steam Workshop versions
-2. **Dependency Resolution**: Automatically download prerequisites
-3. **Mod Packs**: Create and install collections of mods
-4. **Cloud Sync**: Sync configuration across devices
-5. **Steam Workshop Integration**: Direct API access
-
-### 10.3 Code Quality Improvements
-1. **Replace Regex Parsing**: Use proper HTML parser (BeautifulSoup)
-2. **Add Unit Tests**: Test mod scanning and fixing logic
-3. **Configuration Validation**: Validate game folder structure
-4. **Internationalization**: Support multiple languages
-5. **Plugin Architecture**: Allow community extensions
-
-## 11. Usage Scenarios
-
-### 11.1 Basic User Flow
-1. User selects game folder
-2. Sets target Owner ID
-3. App scans and displays mods
-4. User reviews which mods need fixing
-5. Clicks "Fix All" or individual "Fix" buttons
-6. Mods are updated with correct Owner ID
-
-### 11.2 Mod Download Flow
-1. User clicks "Download From Catalogue"
-2. Searches for mods by name
-3. Selects mod from results
-4. App downloads and extracts mod
-5. Shows preview and asks for confirmation
-6. Applies Owner ID fix automatically
-7. Mod appears in main list
-
-### 11.3 Manual Installation Flow
-1. User clicks "Install From ZIP File"
-2. Selects local ZIP archive
-3. App extracts and shows preview
-4. User confirms installation
-5. App applies Owner ID fix if confirmed
-
-## 12. Code Quality Assessment
-
-### 12.1 Strengths
-- Clear separation of concerns
-- Responsive UI with threading
-- Comprehensive error handling
-- Good user feedback mechanisms
-- Modular design allows easy extension
-- Extensive logging for debugging
-
-### 12.2 Weaknesses
-- Heavy reliance on regex for HTML parsing
-- Limited test coverage (no tests found)
-- Some duplicated code (URL extraction logic)
-- Mixed concerns in some classes
-- Hardcoded strings and magic numbers
-
-### 12.3 Maintainability
-- **High**: Well-structured with clear responsibilities
-- **Moderate**: Some complex methods could be refactored
-- **Good**: Consistent coding style and documentation
-
-## 13. Dependencies & Compatibility
-
-### 13.1 Python Dependencies
-- **PyQt5**: GUI framework (LGPL licensed)
-- **requests**: HTTP client (Apache 2.0)
-- **PyInstaller**: Packaging (GPL)
-
-### 13.2 System Requirements
-- **OS**: Windows (primary), macOS/Linux (theoretically)
-- **Python**: 3.7+
-- **Disk Space**: ~50MB for executable
-- **Network**: Required for catalogue features
-
-### 13.3 Game Compatibility
-- **WRSR Version**: All versions using `workshopconfig.ini` format
-- **Mod Format**: Standard WRSR workshop mod structure
-- **Paths**: Expects `media_soviet/workshop_wip` directory
-
-## 14. Conclusion
-
-The WRSR Mod Installer is a well-designed, functional tool that solves a specific problem for WRSR modders. Its architecture demonstrates good software engineering practices with proper threading, modular design, and user-friendly interfaces. While there are areas for improvement (particularly around web scraping fragility and archive format support), the codebase is maintainable and extensible.
-
-The tool successfully bridges the gap between manual mod management and automated solutions, providing value to the WRSR modding community. Its open-ended design allows for future enhancements while remaining focused on its core mission: simplifying Owner ID management for workshop mods.
+PyInstaller only *warns* about modules it can't find. Building with a Python that lacks the requirements therefore produced a 9 MB exe that failed with "No module named 'PyQt5'", so the spec now stops the build in that case. `.gitattributes` pins `*.bat` files to CRLF line endings.

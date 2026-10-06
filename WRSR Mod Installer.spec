@@ -1,4 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
+import importlib.util
+
+# PyInstaller only warns about modules it can't find, so building with a Python that lacks
+# the app's requirements produces an exe that can't start. Stop the build instead.
+missing = [name for name in ('PyQt5', 'requests') if importlib.util.find_spec(name) is None]
+if missing:
+    raise SystemExit(
+        f"\nThis Python is missing the app's requirements: {', '.join(missing)}.\n"
+        "Run build.bat (it sets them up in .venv), or: python -m pip install -r requirements.txt\n")
 
 
 a = Analysis(
